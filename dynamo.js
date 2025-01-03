@@ -22,7 +22,14 @@ const getSingleItemById = async (TABLE_NAME, id) => {
 			id,
 		},
 	};
-	return await DocumentClient.get(params).promise();
+
+	try {
+		const data = await DocumentClient.get(params).promise();
+		return data;
+	} catch (error) {
+		console.error('Error getting item:', error);
+		throw error;
+	}
 };
 
 const insertItem = async (TABLE_NAME, itemObject) => {

@@ -7,9 +7,6 @@ const { v4: uuidv4 } = require('uuid');
 const path = require('path')
 const app = express()
 const { getAllItems, insertItem, updateItem, getSingleItemById, deleteSingleItemById } = require('./dynamo');
-const { PubSub } = require('@google-cloud/pubsub');
-const pubsub = new PubSub();
-const topicName = process.env.PUBSUB_TOPIC_NAME;
 
 const PORT = process.env.PORT || 3000
 const s3 = new aws.S3({
@@ -32,30 +29,34 @@ const storage = multerS3({
 const upload = multer({ storage })
 
 app.post('/upload', upload.array('fileData'), async (req, res) => {
-  
-  const newItem = {
-    id: uuidv4(), // Generates a unique identifier 
-    imagePath: req.files.map((file) => file.location),
-    createdAt: new Date().toISOString(), // Current date and time in ISO format
-  };
-  
-  // Insert the new item into DynamoDB
   try {
-    const insertedItem = await insertItem("s3_image_info", newItem);
-    console.log(insertedItem);
-    // You can further process insertedItem if needed
+    if (!req.files || req.files.length === 0) {
+      return res.status(400).json({ error: 'No files uploaded' });
+    }
+
+    const id = uuidv4();
+    
+    // Prepare item for DynamoDB
+    const itemObject = {
+      id,
+      imagePath: req.files.map(file => file.location),
+      uploadedAt: new Date().toISOString(),
+    };
+
+    // Save to DynamoDB
+    await insertItem('s3_image_info', itemObject);
+
+    res.status(200).json({
+      message: 'Files uploaded successfully',
+      fileId: id,
+      urls: req.files.map(file => file.location)
+    });
+
   } catch (error) {
-    // Handle insertion error
-    console.error('Failed to insert item:', error);
+    console.error('Error in upload:', error);
+    res.status(500).json({ error: 'Failed to upload files' });
   }
-
-
-  res.send({
-    message: 'File Uploaded Successfully',
-    uploaded: req.files.length,
-    filesPath: req.files.map((file) => file.location),
-  })
-})
+});
 
 // Get all files metadata
 app.get('/files', async (req, res) => {
