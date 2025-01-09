@@ -7,6 +7,9 @@ const { v4: uuidv4 } = require('uuid');
 const path = require('path')
 const app = express()
 const { getAllItems, insertItem, updateItem, getSingleItemById, deleteSingleItemById } = require('./dynamo');
+const {PubSub} = require('@google-cloud/pubsub');
+const pubsub = new PubSub();
+const topicName = process.env.PUBSUB_TOPIC_NAME;
 
 const PORT = process.env.PORT || 3000
 const s3 = new aws.S3({
@@ -46,6 +49,17 @@ app.post('/upload', upload.array('fileData'), async (req, res) => {
     // Save to DynamoDB
     await insertItem('s3_image_info', itemObject);
 
+    const uploadMessageData = {
+      eventType: 'FILE_UPLOADED',
+      fileId: id,
+      s3Keys: req.files.map(file => file.key),
+      uploadedAt: new Date().toISOString(),
+      metadata: itemObject
+    };
+    const uploadBuffer = Buffer.from(JSON.stringify(uploadMessageData));
+    console.log(`Publishing upload event for ID: ${id}`);
+    await pubsub.topic(topicName).publish(uploadBuffer);
+
     res.status(200).json({
       message: 'Files uploaded successfully',
       fileId: id,
@@ -76,6 +90,7 @@ app.get('/files/:id', async (req, res) => {
     if (!item) {
       return res.status(404).json({ error: 'File not found' });
     }
+ 
     res.json(item);
   } catch (error) {
     console.error('Failed to fetch item:', error);
@@ -111,14 +126,25 @@ app.get('/files/:id/presigned', async (req, res) => {
 app.delete('/files/:id', async (req, res) => {
   try {
     // 1. Get the file metadata from DynamoDB
-    const item = await getSingleItemById('s3_image_info', req.params.id);
-    if (!item || !item.imagePath || item.imagePath.length === 0) {
+    const result = await getSingleItemById('s3_image_info', req.params.id);
+    
+    if (!result || !result.Item) {
+      console.error('Item not found:', req.params.id);
       return res.status(404).json({ error: 'File not found' });
     }
 
+    const item = result.Item;
+    
+    // Handle both array and string cases for imagePath
+    const imagePath = Array.isArray(item.imagePath) ? item.imagePath[0] : item.imagePath;
+    
+    if (!imagePath) {
+      console.error('ImagePath is missing:', item);
+      return res.status(404).json({ error: 'File path not found' });
+    }
+
     // 2. Delete the file from S3
-    const imageUrl = item.imagePath[0];
-    const key = imageUrl.split('/').pop();
+    const key = imagePath.split('/').pop();
     await s3.deleteObject({
       Bucket: process.env.BUCKET_NAME,
       Key: key
@@ -127,16 +153,16 @@ app.delete('/files/:id', async (req, res) => {
     // 3. Delete the metadata from DynamoDB
     await deleteSingleItemById('s3_image_info', req.params.id);
 
-    // 4. Publish deletion event to Pub/Sub
-    const messageData = {
+    const deleteMessageData = {
+      eventType: 'FILE_DELETED',
       fileId: req.params.id,
       s3Key: key,
       deletedAt: new Date().toISOString(),
       metadata: item
     };
-
-    const dataBuffer = Buffer.from(JSON.stringify(messageData));
-    await pubsub.topic(topicName).publish(dataBuffer);
+    const deleteBuffer = Buffer.from(JSON.stringify(deleteMessageData));
+    console.log(`Publishing deletion event for ID: ${req.params.id}`);
+    await pubsub.topic(topicName).publish(deleteBuffer);
 
     res.json({ message: 'File deleted successfully' });
   } catch (error) {
